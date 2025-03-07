@@ -7,9 +7,12 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY requirements.txt /app
-COPY app.py /app
-
+COPY requirements.txt .
 RUN pip install -r requirements.txt
+
+COPY resources/flink-connector-kafka.jar /usr/local/lib/python3.8/site-packages/pyflink/lib
+COPY resources/kafka-clients.jar /usr/local/lib/python3.8/site-packages/pyflink/lib
+
+COPY app.py .
 
 CMD ["python", "app.py"]

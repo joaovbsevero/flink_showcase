@@ -1,33 +1,18 @@
-import time
 import json
+import time
+from pathlib import Path
 
+from pyflink.common.serialization import SimpleStringSchema
 from pyflink.common.typeinfo import Types
+from pyflink.common.watermark_strategy import WatermarkStrategy
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import (
-    DeserializationSchema,
-    FlinkKafkaConsumer,
-    FlinkKafkaProducer,
-    SerializationSchema,
+    DeliveryGuarantee,
+    KafkaRecordSerializationSchema,
+    KafkaSink,
+    KafkaSource,
 )
 from pyflink.datastream.execution_mode import RuntimeExecutionMode
-
-
-# Custom JSON Deserialization Schema
-class JSONDeserializationSchema(DeserializationSchema):
-    def deserialize(self, message: bytes):
-        return json.loads(message.decode("utf-8"))
-
-    def is_end_of_stream(self, next_element):
-        return False
-
-    def get_produced_type(self):
-        return Types.MAP(Types.STRING(), Types.STRING())
-
-
-# Custom JSON Serialization Schema
-class JSONSerializationSchema(SerializationSchema):
-    def serialize(self, element) -> bytes:
-        return json.dumps(element).encode("utf-8")
 
 
 # Since the question states to mock the LLM and Google search, we’ll just do a placeholder function here.
@@ -39,45 +24,62 @@ def mock_enrich_text(post_text):
 
 def main():
     env = StreamExecutionEnvironment.get_execution_environment()
+    jar_path = Path(__file__).parent / "resources"
+    env.add_jars(*[f"file://{p.absolute()}" for p in jar_path.glob("*.jar")])
+
     # Run in streaming mode
     env.set_runtime_mode(RuntimeExecutionMode.STREAMING)
 
     # Set parallelism to 1 for simplicity in a minimal example
-    env.set_parallelism(1)
+    env.set_parallelism(8)
 
     # Create Kafka Consumer
-    consumer = FlinkKafkaConsumer(
-        topics="raw_posts",
-        properties={
-            "bootstrap.servers": "kafka:9092",
-            "group.id": "flink_enhance_group",
-        },
-        deserialization_schema=JSONDeserializationSchema(),
+    consumer = (
+        KafkaSource.builder()
+        .set_topics("rawPosts")
+        .set_bootstrap_servers("kafka:9092")
+        .set_group_id("flinkEnhanceGroup")
+        .set_property("transaction.max.timeout.ms", "100")
+        .set_value_only_deserializer(SimpleStringSchema())
+        .build()
     )
 
     # Create Kafka Producer
-    producer = FlinkKafkaProducer(
-        topic="enhanced_posts",
-        producer_config={"bootstrap.servers": "kafka:9092"},
-        serialization_schema=JSONSerializationSchema(),
+    producer = (
+        KafkaSink.builder()
+        .set_bootstrap_servers("kafka:9092")
+        .set_record_serializer(
+            KafkaRecordSerializationSchema.builder()
+            .set_value_serialization_schema(SimpleStringSchema())
+            .set_topic("enhancedPosts")
+            .build()
+        )
+        # .set_delivery_guarantee(DeliveryGuarantee.EXACTLY_ONCE)
+        .set_property("transaction.max.timeout.ms", "100")
+        .build()
     )
 
     # Create DataStream that receives data from Kafka
-    ds = env.add_source(consumer)
+    ds = env.from_source(consumer, WatermarkStrategy.no_watermarks(), "EnhanceSource")
+
+    def process(post):
+        post = json.loads(post)
+        post = {"id": str(post["id"]), "text": mock_enrich_text(post["text"])}
+        return post
 
     # Add enrichment stage to process received events
     ds.map(
-        lambda post: {"id": post["id"], "text": mock_enrich_text(post["text"])},
+        process,
         Types.MAP(Types.STRING(), Types.STRING()),
     )
 
     # Add sink that routes data to Kafka
-    ds.add_sink(producer)
+    ds.sink_to(producer)
 
     # Execute
     env.execute("EnhanceFlinkJob")
 
 
 if __name__ == "__main__":
-    time.sleep(20)
+    time.sleep(15)
     main()
